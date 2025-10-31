@@ -138,6 +138,27 @@ function get_status_class($status_name) {
       background-color: #ccfbf1; /* Teal-200 */
   }
 
+  /* Highlight selected booking */
+  tr.highlight-booking {
+      outline: 3px solid #38bdf8;
+      outline-offset: -3px;
+      background-color: #ecfeff !important;
+  }
+
+  .highlight-booking-card {
+      box-shadow: 0 0 0 3px rgba(14, 165, 233, 0.35);
+      transition: box-shadow 0.3s;
+  }
+
+  @keyframes pulseHighlight {
+      0%, 100% { transform: scale(1); }
+      50% { transform: scale(1.01); }
+  }
+
+  .highlight-animate {
+      animation: pulseHighlight 1.2s ease-in-out 2;
+  }
+
   @media (max-width: 768px) {
     /* Hide the traditional table on mobile */
     .booking-table-container {
@@ -272,7 +293,7 @@ function get_status_class($status_name) {
         </thead>
         <tbody>
           <?php foreach ($bookings as $row): ?>
-          <tr class="bg-white border-b hover:bg-teal-50/50 transition duration-150">
+          <tr id="booking-<?php echo $row['BookingID']; ?>" class="bg-white border-b hover:bg-teal-50/50 transition duration-150">
             <td class="py-4 px-6 font-medium text-gray-900"><?php echo $row['BookingID']; ?></td>
             <td class="py-4 px-6 font-semibold text-gray-800">
                 <a href="venue_detail.php?id=<?php echo $row['VenueID']; ?>" class="text-teal-600 hover:text-teal-700 hover:underline">
@@ -325,7 +346,7 @@ function get_status_class($status_name) {
     <!-- 2. MOBILE VIEW: Card Grid (visible < md) -->
     <div class="booking-card-grid grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-4 md:hidden">
       <?php foreach ($bookings as $row): ?>
-      <div class="bg-white rounded-xl shadow-md p-4 border border-teal-100 hover:shadow-lg transition duration-300">
+      <div id="booking-<?php echo $row['BookingID']; ?>-card" class="bg-white rounded-xl shadow-md p-4 border border-teal-100 hover:shadow-lg transition duration-300">
         <!-- Card Header (Venue Name & ID) -->
         <div class="flex justify-between items-start mb-2 border-b pb-2">
             <div>
@@ -410,6 +431,42 @@ function toggleMenu() {
   const menu = document.getElementById('mobile-menu');
   menu.style.display = menu.style.display === 'flex' ? 'none' : 'flex';
 }
+
+function highlightBookingFromHash() {
+  const hash = window.location.hash;
+  if (!hash || !hash.startsWith('#booking-')) {
+    return;
+  }
+
+  const id = hash.substring(1);
+  const row = document.getElementById(id);
+  const card = document.getElementById(id + '-card');
+  let target = row;
+
+  if (window.innerWidth <= 768 && card) {
+    target = card;
+  } else if (!row && card) {
+    target = card;
+  }
+
+  if (!target) {
+    return;
+  }
+
+  const highlightClasses = target.tagName === 'TR'
+    ? ['highlight-booking', 'highlight-animate']
+    : ['highlight-booking-card', 'highlight-animate'];
+
+  target.classList.add(...highlightClasses);
+  target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+  setTimeout(() => {
+    highlightClasses.forEach(cls => target.classList.remove(cls));
+  }, 4000);
+}
+
+document.addEventListener('DOMContentLoaded', highlightBookingFromHash);
+window.addEventListener('hashchange', highlightBookingFromHash);
 </script>
 </body>
 </html>

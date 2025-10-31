@@ -28,7 +28,7 @@ if ($avatarPath && _exists_rel($avatarPath)) {
 // ดึงรายการสนาม
 $venues = [];
 $sql = "
-SELECT 
+SELECT
     v.*,
     vt.TypeName,
     IFNULL(ROUND(AVG(r.Rating),1), 0) AS AvgRating,
@@ -62,7 +62,152 @@ if ($res = $conn->query($sql)) {
   $venues = $res->fetch_all(MYSQLI_ASSOC);
 }
 
+$bookingSummary = [
+  'upcoming'  => 0,
+  'confirmed' => 0,
+  'completed' => 0,
+  'cancelled' => 0,
+  'hours'     => 0.0,
+];
+$upcomingBookings = [];
+$hasCustomerData = ($role === 'customer') && !empty($_SESSION['user_id']);
+
+if ($hasCustomerData) {
+  $customerId = (int)$_SESSION['user_id'];
+
+  $summarySql = "
+    SELECT
+      SUM(CASE WHEN b.BookingStatusID IN (1,2) AND b.StartTime >= NOW() THEN 1 ELSE 0 END) AS upcoming_count,
+      SUM(CASE WHEN b.BookingStatusID = 2 THEN 1 ELSE 0 END) AS confirmed_count,
+      SUM(CASE WHEN b.BookingStatusID = 5 THEN 1 ELSE 0 END) AS completed_count,
+      SUM(CASE WHEN b.BookingStatusID IN (3,4) THEN 1 ELSE 0 END) AS cancelled_count,
+      SUM(COALESCE(b.HoursBooked, TIMESTAMPDIFF(MINUTE, b.StartTime, b.EndTime) / 60)) AS total_hours
+    FROM Tbl_Booking b
+    WHERE b.CustomerID = ?
+  ";
+
+  if ($stmt = $conn->prepare($summarySql)) {
+    $stmt->bind_param('i', $customerId);
+    if ($stmt->execute()) {
+      if ($result = $stmt->get_result()) {
+        if ($row = $result->fetch_assoc()) {
+          $bookingSummary['upcoming']  = (int)($row['upcoming_count'] ?? 0);
+          $bookingSummary['confirmed'] = (int)($row['confirmed_count'] ?? 0);
+          $bookingSummary['completed'] = (int)($row['completed_count'] ?? 0);
+          $bookingSummary['cancelled'] = (int)($row['cancelled_count'] ?? 0);
+          $bookingSummary['hours']     = round((float)($row['total_hours'] ?? 0), 1);
+        }
+      }
+    }
+    $stmt->close();
+  }
+
+  $upcomingSql = "
+    SELECT
+      b.BookingID,
+      b.VenueID,
+      v.VenueName,
+      vt.TypeName,
+      b.StartTime,
+      b.EndTime,
+      bs.StatusName,
+      TIMESTAMPDIFF(MINUTE, b.StartTime, b.EndTime) AS DurationMinutes
+    FROM Tbl_Booking b
+    JOIN Tbl_Venue v ON b.VenueID = v.VenueID
+    JOIN Tbl_Venue_Type vt ON v.VenueTypeID = vt.VenueTypeID
+    JOIN Tbl_Booking_Status bs ON b.BookingStatusID = bs.BookingStatusID
+    WHERE b.CustomerID = ?
+      AND b.StartTime >= NOW()
+      AND b.BookingStatusID NOT IN (3,4)
+    ORDER BY b.StartTime ASC
+    LIMIT 3
+  ";
+
+  if ($stmt = $conn->prepare($upcomingSql)) {
+    $stmt->bind_param('i', $customerId);
+    if ($stmt->execute()) {
+      if ($result = $stmt->get_result()) {
+        $upcomingBookings = $result->fetch_all(MYSQLI_ASSOC);
+      }
+    }
+    $stmt->close();
+  }
+}
+
 $conn->close();
+
+function formatThaiDateTime(?string $dateTimeStr): string {
+  if (empty($dateTimeStr)) {
+    return '-';
+  }
+
+  try {
+    $dt = new DateTime($dateTimeStr);
+  } catch (Exception $e) {
+    return htmlspecialchars($dateTimeStr, ENT_QUOTES, 'UTF-8');
+  }
+
+  $thaiMonths = [
+    1 => 'ม.ค.',
+    2 => 'ก.พ.',
+    3 => 'มี.ค.',
+    4 => 'เม.ย.',
+    5 => 'พ.ค.',
+    6 => 'มิ.ย.',
+    7 => 'ก.ค.',
+    8 => 'ส.ค.',
+    9 => 'ก.ย.',
+    10 => 'ต.ค.',
+    11 => 'พ.ย.',
+    12 => 'ธ.ค.'
+  ];
+
+  $month = $thaiMonths[(int)$dt->format('n')] ?? $dt->format('M');
+  $day = $dt->format('j');
+  $year = (int)$dt->format('Y') + 543;
+  $time = $dt->format('H:i');
+
+  return sprintf('%s %s %s • %s น.', $day, $month, $year, $time);
+}
+
+function formatDuration(?int $minutes): string {
+  if (empty($minutes) || $minutes <= 0) {
+    return 'ไม่ระบุระยะเวลา';
+  }
+
+  $hours = intdiv($minutes, 60);
+  $mins = $minutes % 60;
+  $parts = [];
+
+  if ($hours > 0) {
+    $parts[] = $hours . ' ชม.';
+  }
+
+  if ($mins > 0) {
+    $parts[] = $mins . ' นาที';
+  }
+
+  return implode(' ', $parts);
+}
+
+function getBookingStatusBadgeClass(string $statusName): string {
+  $statusName = trim($statusName);
+
+  if ($statusName === 'รอยืนยัน') {
+    return 'pending';
+  }
+  if ($statusName === 'ยืนยันแล้ว') {
+    return 'confirmed';
+  }
+  if ($statusName === 'เข้าใช้บริการแล้ว') {
+    return 'completed';
+  }
+  if ($statusName === 'ยกเลิกโดยลูกค้า' || $statusName === 'ยกเลิกโดยระบบ') {
+    return 'cancelled';
+  }
+
+  return 'default';
+}
 ?>
 <!DOCTYPE html>
 <html lang="th">
@@ -861,6 +1006,212 @@ body {
   border-color: var(--gray-200);
 }
 
+.section-subtitle {
+  margin-top: 0.5rem;
+  font-size: 1rem;
+  color: var(--gray-700);
+  font-weight: 600;
+  max-width: 720px;
+}
+
+.dashboard-insights {
+  max-width: 1400px;
+  margin: 0 auto 4rem;
+  padding: 0 2rem;
+}
+
+.insights-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 1.75rem;
+  margin-top: 2rem;
+}
+
+.summary-panel,
+.upcoming-panel {
+  background: white;
+  border-radius: 18px;
+  padding: 2rem;
+  border: 2px solid var(--gray-200);
+  box-shadow: 0 12px 24px rgba(37, 99, 235, 0.08);
+}
+
+.summary-panel {
+  position: relative;
+  overflow: hidden;
+}
+
+.summary-panel::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(135deg, rgba(37, 99, 235, 0.08), rgba(59, 130, 246, 0.05));
+  pointer-events: none;
+}
+
+.summary-heading,
+.upcoming-heading {
+  font-family: 'Kanit', sans-serif;
+  font-weight: 800;
+  font-size: 1.375rem;
+  color: var(--gray-900);
+  margin-bottom: 1.25rem;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.summary-heading span,
+.upcoming-heading span {
+  font-size: 1.5rem;
+}
+
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 1rem;
+}
+
+.metric-card {
+  background: var(--gray-50);
+  border-radius: 16px;
+  padding: 1.25rem;
+  border: 2px solid var(--gray-200);
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  transition: transform 0.3s, box-shadow 0.3s;
+}
+
+.metric-card:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 12px 24px rgba(37, 99, 235, 0.15);
+}
+
+.metric-icon {
+  font-size: 1.5rem;
+}
+
+.metric-value {
+  font-size: 2rem;
+  font-weight: 900;
+  color: var(--primary);
+  font-family: 'Kanit', sans-serif;
+}
+
+.metric-label {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--gray-700);
+}
+
+.upcoming-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.upcoming-card {
+  border: 2px solid var(--gray-200);
+  border-radius: 14px;
+  padding: 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  background: linear-gradient(135deg, rgba(255,255,255,0.95), rgba(243, 244, 246, 0.9));
+  transition: transform 0.3s, box-shadow 0.3s;
+}
+
+.upcoming-card:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 10px 22px rgba(37, 99, 235, 0.12);
+}
+
+.upcoming-title {
+  font-size: 1.1rem;
+  font-weight: 800;
+  color: var(--gray-900);
+}
+
+.upcoming-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  font-weight: 600;
+  color: var(--gray-700);
+  font-size: 0.95rem;
+}
+
+.upcoming-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.booking-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.35rem 0.85rem;
+  border-radius: 999px;
+  font-weight: 700;
+  font-size: 0.85rem;
+  border: 2px solid transparent;
+}
+
+.booking-badge.pending {
+  background: #fef9c3;
+  color: #854d0e;
+  border-color: #facc15;
+}
+
+.booking-badge.confirmed {
+  background: #dcfce7;
+  color: #166534;
+  border-color: #22c55e;
+}
+
+.booking-badge.completed {
+  background: #dbeafe;
+  color: #1d4ed8;
+  border-color: #3b82f6;
+}
+
+.booking-badge.cancelled {
+  background: #fee2e2;
+  color: #b91c1c;
+  border-color: #ef4444;
+}
+
+.booking-badge.default {
+  background: #e5e7eb;
+  color: #374151;
+  border-color: #d1d5db;
+}
+
+.insights-placeholder {
+  border: 2px dashed var(--primary-light);
+  border-radius: 16px;
+  padding: 2rem;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  align-items: center;
+  justify-content: center;
+  color: var(--gray-700);
+  font-weight: 600;
+  min-height: 220px;
+}
+
+.insights-placeholder-icon {
+  font-size: 2.5rem;
+}
+
+#noResults {
+  margin-top: 2rem;
+  display: none;
+}
+
 /* ========== FOOTER ========== */
 .footer {
   background: linear-gradient(135deg, var(--primary-dark) 0%, var(--primary) 100%);
@@ -920,7 +1271,20 @@ body {
   .top-bar {
     display: none;
   }
-  
+
+  .dashboard-insights {
+    padding: 0 1.25rem;
+  }
+
+  .summary-panel,
+  .upcoming-panel {
+    padding: 1.5rem;
+  }
+
+  .metric-grid {
+    grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  }
+
   .header-container {
     flex-direction: column;
     gap: 1rem;
@@ -1142,6 +1506,92 @@ body {
   </div>
 </section>
 
+<!-- ========== CUSTOMER INSIGHTS ========== -->
+<section class="dashboard-insights">
+  <div class="section-header">
+    <h2 class="section-title">ภาพรวมการใช้งานล่าสุด</h2>
+    <p class="section-subtitle">ติดตามสถานะการจองสนามของคุณ พร้อมดูรายการนัดหมายที่จะมาถึงแบบรวดเร็ว</p>
+  </div>
+
+  <div class="insights-grid">
+    <div class="summary-panel">
+      <h3 class="summary-heading"><span>📊</span> สรุปรายการจอง</h3>
+      <?php if ($hasCustomerData): ?>
+        <div class="metric-grid">
+          <div class="metric-card">
+            <div class="metric-icon">⏳</div>
+            <div class="metric-value"><?php echo number_format($bookingSummary['upcoming']); ?></div>
+            <div class="metric-label">การจองที่กำลังจะถึง</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-icon">✅</div>
+            <div class="metric-value"><?php echo number_format($bookingSummary['confirmed']); ?></div>
+            <div class="metric-label">ยืนยันแล้วทั้งหมด</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-icon">🏁</div>
+            <div class="metric-value"><?php echo number_format($bookingSummary['completed']); ?></div>
+            <div class="metric-label">ใช้บริการเสร็จสิ้น</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-icon">🕒</div>
+            <div class="metric-value"><?php echo number_format($bookingSummary['hours'], 1); ?></div>
+            <div class="metric-label">ชั่วโมงที่จองทั้งหมด</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-icon">⚠️</div>
+            <div class="metric-value"><?php echo number_format($bookingSummary['cancelled']); ?></div>
+            <div class="metric-label">รายการที่ถูกยกเลิก</div>
+          </div>
+        </div>
+      <?php else: ?>
+        <div class="insights-placeholder">
+          <div class="insights-placeholder-icon">👀</div>
+          <div>เข้าสู่ระบบด้วยบัญชีลูกค้าเพื่อดูสรุปการจองส่วนตัวของคุณ</div>
+          <a class="btn btn-secondary" href="<?php echo $role === 'employee' ? 'manage_bookings.php' : 'login.php'; ?>">ไปยังหน้าจัดการ</a>
+        </div>
+      <?php endif; ?>
+    </div>
+
+    <div class="upcoming-panel">
+      <h3 class="upcoming-heading"><span>📅</span> การจองที่จะมาถึง</h3>
+      <?php if ($hasCustomerData && !empty($upcomingBookings)): ?>
+        <div class="upcoming-list">
+          <?php foreach ($upcomingBookings as $booking): ?>
+            <div class="upcoming-card">
+              <div class="upcoming-title"><?php echo htmlspecialchars($booking['VenueName']); ?></div>
+              <div class="upcoming-meta">
+                <span>🗓️ <?php echo htmlspecialchars(formatThaiDateTime($booking['StartTime'])); ?></span>
+                <span>⌛ <?php echo htmlspecialchars(formatDuration((int)($booking['DurationMinutes'] ?? 0))); ?></span>
+                <span>🏷️ <?php echo htmlspecialchars($booking['TypeName']); ?></span>
+              </div>
+              <span class="booking-badge <?php echo getBookingStatusBadgeClass($booking['StatusName']); ?>">
+                <?php echo htmlspecialchars($booking['StatusName']); ?>
+              </span>
+              <div class="upcoming-actions" style="margin-top: 0.5rem;">
+                <a href="my_bookings.php#booking-<?php echo (int)$booking['BookingID']; ?>" class="btn btn-secondary" style="flex: none; padding: 0.75rem 1rem;">รายละเอียดการจอง</a>
+                <a href="venue_detail.php?venue_id=<?php echo (int)$booking['VenueID']; ?>" class="btn btn-primary" style="flex: none; padding: 0.75rem 1rem;">ดูข้อมูลสนาม</a>
+              </div>
+            </div>
+          <?php endforeach; ?>
+        </div>
+      <?php elseif ($hasCustomerData): ?>
+        <div class="insights-placeholder">
+          <div class="insights-placeholder-icon">🎉</div>
+          <div>ยังไม่มีการจองที่จะถึงในตอนนี้<br>เริ่มต้นจองสนามแรกของคุณได้เลย</div>
+          <a class="btn btn-primary" href="#venues" style="flex: none; padding: 0.85rem 1.5rem;">สำรวจสนามว่าง</a>
+        </div>
+      <?php else: ?>
+        <div class="insights-placeholder">
+          <div class="insights-placeholder-icon">ℹ️</div>
+          <div>ดูปฏิทินสาธารณะเพื่อเช็คความพร้อมของสนามทั้งหมดได้ทันที</div>
+          <a class="btn btn-primary" href="bookings_calendar_public.php" style="flex: none; padding: 0.85rem 1.5rem;">เปิดปฏิทินสนาม</a>
+        </div>
+      <?php endif; ?>
+    </div>
+  </div>
+</section>
+
 <!-- ========== FILTERS ========== -->
 <section class="filters-section" id="venues">
   <div class="section-header">
@@ -1178,7 +1628,7 @@ body {
         <div class="empty-state-title">ไม่พบสนามกีฬา</div>
         <div class="empty-state-text">ขออภัย ไม่มีสนามกีฬาในระบบในขณะนี้</div>
       </div>
-    <?php else: foreach ($venues as $venue): 
+    <?php else: foreach ($venues as $venue):
       $st = $venue['StatusNow'] ?? 'available';
       $disableBooking = in_array($st, ['unavailable','maintenance','closed']);
       $statusMap = [
@@ -1189,12 +1639,19 @@ body {
         'closed' => ['label' => '🚫 ปิด', 'class' => 'closed']
       ];
       $statusInfo = $statusMap[$st] ?? ['label' => 'ไม่ทราบ', 'class' => 'unavailable'];
+      $addressFull = trim($venue['Address'] ?? '');
+      if ($addressFull === '') {
+        $addressFull = 'กรุงเทพมหานคร';
+      }
     ?>
-      <div class="venue-card" data-type="<?php echo htmlspecialchars($venue['TypeName']); ?>">
+      <div class="venue-card"
+           data-type="<?php echo htmlspecialchars($venue['TypeName']); ?>"
+           data-name="<?php echo htmlspecialchars($venue['VenueName']); ?>"
+           data-address="<?php echo htmlspecialchars($addressFull); ?>">
         <div class="venue-image-wrapper">
           <a href="venue_detail.php?venue_id=<?php echo $venue['VenueID']; ?>">
-            <img src="<?php echo htmlspecialchars($venue['ImageURL'] ?: 'https://images.unsplash.com/photo-1574629810360-7efbbe195018?w=400&h=300&fit=crop'); ?>" 
-                 alt="<?php echo htmlspecialchars($venue['VenueName']); ?>" 
+            <img src="<?php echo htmlspecialchars($venue['ImageURL'] ?: 'https://images.unsplash.com/photo-1574629810360-7efbbe195018?w=400&h=300&fit=crop'); ?>"
+                 alt="<?php echo htmlspecialchars($venue['VenueName']); ?>"
                  class="venue-image">
           </a>
           <span class="venue-badge <?php echo $statusInfo['class']; ?>">
@@ -1224,13 +1681,11 @@ body {
   <div class="info-row">
     <span class="info-icon">📍</span>
     <?php
-      // ตัดที่อยู่แบบรองรับภาษาไทย (กันตัวหนังสือเพี้ยน)
-      $addr = trim($venue['Address'] ?? 'กรุงเทพมหานคร');
       $addrShort = function_exists('mb_strimwidth')
-        ? mb_strimwidth($addr, 0, 50, '…', 'UTF-8')              // แนะนำ
-        : (function_exists('mb_substr') ? mb_substr($addr, 0, 50, 'UTF-8') : $addr);  // fallback
+        ? mb_strimwidth($addressFull, 0, 50, '…', 'UTF-8')
+        : (function_exists('mb_substr') ? mb_substr($addressFull, 0, 50, 'UTF-8') : substr($addressFull, 0, 50));
     ?>
-    <span title="<?= htmlspecialchars($addr) ?>">
+    <span title="<?= htmlspecialchars($addressFull) ?>">
       <?= htmlspecialchars($addrShort) ?>
     </span>
   </div>
@@ -1267,6 +1722,12 @@ body {
         </div>
       </div>
     <?php endforeach; endif; ?>
+  </div>
+
+  <div class="empty-state" id="noResults">
+    <div class="empty-state-icon">🔍</div>
+    <div class="empty-state-title">ไม่พบสนามที่ตรงกับการค้นหา</div>
+    <div class="empty-state-text">ลองเปลี่ยนคำค้นหรือเลือกประเภทสนามอื่น</div>
   </div>
 </section>
 
@@ -1319,61 +1780,85 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 });
 
-// ========== Search Functionality ==========
+// ========== Search & Filter Functionality ==========
 const searchBox = document.getElementById('searchBox');
 const searchBtn = document.querySelector('.search-btn');
+let activeFilter = 'all';
 
-function performSearch() {
-  const query = searchBox.value.toLowerCase().trim();
+function updateNoResultsState() {
   const cards = document.querySelectorAll('.venue-card');
-  
+  const message = document.getElementById('noResults');
+  if (!message) return;
+  if (cards.length === 0) {
+    message.style.display = 'none';
+    return;
+  }
+  const hasVisible = Array.from(cards).some(card => card.style.display !== 'none');
+  message.style.display = hasVisible ? 'none' : 'flex';
+}
+
+function updateVenueVisibility(scrollToResults = false) {
+  const query = searchBox ? searchBox.value.toLowerCase().trim() : '';
+  const cards = document.querySelectorAll('.venue-card');
+  let visibleCount = 0;
+
   cards.forEach(card => {
-    const venueName = card.querySelector('.venue-name').textContent.toLowerCase();
-    const venueType = card.dataset.type.toLowerCase();
-    
-    if (venueName.includes(query) || venueType.includes(query) || query === '') {
-      card.style.display = 'block';
-    } else {
-      card.style.display = 'none';
+    const type = (card.dataset.type || '').toLowerCase();
+    const name = (card.dataset.name || '').toLowerCase();
+    const address = (card.dataset.address || '').toLowerCase();
+
+    const matchesFilter = activeFilter === 'all' || type === activeFilter;
+    const matchesSearch = !query || name.includes(query) || type.includes(query) || address.includes(query);
+
+    const shouldShow = matchesFilter && matchesSearch;
+    card.style.display = shouldShow ? 'block' : 'none';
+    if (shouldShow) {
+      visibleCount++;
     }
   });
-  
-  // Scroll to venues section
-  if (query !== '') {
-    document.getElementById('venues').scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+  const shouldScroll = scrollToResults && visibleCount > 0;
+  updateNoResultsState();
+
+  if (shouldScroll) {
+    const section = document.getElementById('venues');
+    if (section) {
+      section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
   }
 }
 
-searchBox.addEventListener('input', performSearch);
-searchBtn.addEventListener('click', performSearch);
-searchBox.addEventListener('keypress', (e) => {
-  if (e.key === 'Enter') performSearch();
-});
+if (searchBox && searchBtn) {
+  searchBox.addEventListener('input', () => updateVenueVisibility());
+  searchBtn.addEventListener('click', () => updateVenueVisibility(true));
+  searchBox.addEventListener('keypress', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      updateVenueVisibility(true);
+    }
+  });
+}
 
-// ========== Filter Functionality ==========
 document.querySelectorAll('.filter-btn').forEach(btn => {
   btn.addEventListener('click', () => {
     document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
-    
-    const filterType = btn.dataset.type;
-    const cards = document.querySelectorAll('.venue-card');
-    
-    cards.forEach(card => {
-      if (filterType === 'all' || card.dataset.type === filterType) {
-        card.style.display = 'block';
-      } else {
-        card.style.display = 'none';
-      }
-    });
+    activeFilter = (btn.dataset.type || 'all').toLowerCase();
+    updateVenueVisibility();
   });
 });
+
+updateVenueVisibility();
 
 // ========== Smooth Scroll ==========
 document.querySelectorAll('a[href^="#"]').forEach(anchor => {
   anchor.addEventListener('click', function (e) {
+    const selector = this.getAttribute('href');
+    if (!selector || selector === '#') {
+      return;
+    }
     e.preventDefault();
-    const target = document.querySelector(this.getAttribute('href'));
+    const target = document.querySelector(selector);
     if (target) {
       target.scrollIntoView({
         behavior: 'smooth',
